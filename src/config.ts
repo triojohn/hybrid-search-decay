@@ -65,6 +65,16 @@ export const config = {
     const raw = Number(process.env.OBSIDIAN_BM25_LENGTH_EXP);
     return Number.isFinite(raw) ? raw : 0.5;
   },
+  /**
+   * Cut the semantic pool off per NOTE rather than per chunk: the KNN window is grown
+   * until it holds `limit` distinct notes before the pool is trimmed. Off (0/false/no)
+   * restores the upstream behaviour, where the pool is the top `limit * 5` chunks and a
+   * note with many chunks can crowd the pool down to fewer distinct notes.
+   */
+  get vecPerNoteCutoff(): boolean {
+    const raw = process.env.OBSIDIAN_VEC_PER_NOTE_CUTOFF?.trim().toLowerCase();
+    return raw !== '0' && raw !== 'false' && raw !== 'no';
+  },
   get dbPath(): string {
     const v = process.env.OBSIDIAN_VAULT_PATH;
     if (!v) throw new Error('OBSIDIAN_VAULT_PATH environment variable is required');

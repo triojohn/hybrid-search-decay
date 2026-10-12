@@ -809,6 +809,21 @@ function isMarkdownWhitespace(char: string): boolean {
  */
 const VEC_MAX_K = 4096;
 
+type VectorRow = {
+  chunk_id: number;
+  distance: number;
+  note_id: number;
+  chunk_index: number;
+  chunk_text: string;
+  heading_path: string | null;
+  char_start: number | null;
+  char_end: number | null;
+  path: string;
+  title: string;
+  tags: string;
+  aliases: string | null;
+};
+
 /**
  * @param excludeLinkedFrom when set, omits that note and everything it links to —
  *   the "already known" set for a similarity lookup.
@@ -875,9 +890,8 @@ function searchVector(
     const db = getDb();
 
     try {
-      const rows = db
-        .prepare(
-          `
+      const pool = db.prepare(
+        `
       WITH ranked AS (
         SELECT vc.chunk_id, vc.distance,
                c.note_id, c.chunk_index, c.text AS chunk_text, c.heading_path,
@@ -897,23 +911,35 @@ function searchVector(
       ORDER BY distance, chunk_index
       LIMIT ?
     `,
-        )
-        // `k` is validated by sqlite-vec BEFORE the pre-filter runs, so the VEC_MAX_K
-        // clamp stays regardless of how narrow the restriction is.
-        .all(queryEmbedding, Math.min(limit * 5, VEC_MAX_K), ...extraParams, limit) as Array<{
-        chunk_id: number;
-        distance: number;
-        note_id: number;
-        chunk_index: number;
-        chunk_text: string;
-        heading_path: string | null;
-        char_start: number | null;
-        char_end: number | null;
-        path: string;
-        title: string;
-        tags: string;
-        aliases: string | null;
-      }>;
+      );
+
+      // The KNN window is counted in CHUNKS; the pool is counted in NOTES. A long note
+      // contributes dozens of near-identical chunks — the 518-chunk sessions report takes
+      // 62 of a 100-chunk window on a query it barely matches — and the per-note collapse
+      // happens INSIDE the window, so the pool can collapse to far fewer than `limit`
+      // distinct notes and would then silently return that few. Measured on the aaz vault:
+      // a 100-chunk window holds 24 distinct notes, a 400-chunk window 110 — the note
+      // count the arm can see is an artifact of clumping, not of relevance.
+      // With the cutoff on, the window is grown (doubling, so at most 6 extra KNN runs
+      // before VEC_MAX_K) until it holds `limit` DISTINCT notes, and only then trimmed by
+      // note. LIMIT -1 means no limit: `row_num = 1` already yields one row per note, so
+      // the row count IS the distinct-note count inside the window.
+      // `k` is validated by sqlite-vec BEFORE the pre-filter runs, so the VEC_MAX_K
+      // clamp stays regardless of how narrow the restriction is.
+      const perNoteCutoff = config.vecPerNoteCutoff;
+      let k = Math.min(limit * 5, VEC_MAX_K);
+      let rows: VectorRow[];
+      for (;;) {
+        rows = pool.all(
+          queryEmbedding,
+          k,
+          ...extraParams,
+          perNoteCutoff ? -1 : limit,
+        ) as VectorRow[];
+        if (!perNoteCutoff || rows.length >= limit || k >= VEC_MAX_K) break;
+        k = Math.min(k * 2, VEC_MAX_K);
+      }
+      if (rows.length > limit) rows = rows.slice(0, limit);
 
       return rows.map((row) => {
         // cosine similarity from L2 for unit vectors: cos = 1 - L2² / 2

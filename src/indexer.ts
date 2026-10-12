@@ -252,6 +252,12 @@ export async function indexFile(
         (body, headingChain) => tokenPolicy.count(project(body, headingChain)),
         config.chunkOverlap,
         boundaryIndex,
+      ).filter(
+        // A chunk whose text repeats the previous chunk's byte-for-byte adds nothing to
+        // the index, but it does take a slot in the vector KNN window (identical text
+        // embeds to an identical vector at an identical distance), where it can crowd
+        // other notes out of the semantic pool. Keep the first of each run.
+        (chunk, i, all) => i === 0 || chunk.text !== all[i - 1]!.text,
       );
       embeddedChunks = await embedChunksWithRecovery({
         source: content,
