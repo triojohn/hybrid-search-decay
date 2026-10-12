@@ -4,6 +4,12 @@ export default defineConfig({
   test: {
     env: {
       VAULT_PATH: '/tmp/test-vault',
+      // Fixtures are micro-corpora (notes of 15-113 chars) where corpus-relative length
+      // de-biasing is meaningless: at a ~3x-average ratio it reorders near-ties that the
+      // raw BM25 order deliberately settled. Pin the legacy behaviour for the suite and
+      // let the dedicated length-normalization test opt in per case. Production default
+      // stays ON (config.bm25LengthNorm).
+      OBSIDIAN_BM25_LENGTH_NORM: '0',
     },
     maxWorkers: 1,
     testTimeout: 30_000,

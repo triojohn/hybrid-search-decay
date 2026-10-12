@@ -52,6 +52,19 @@ export const config = {
     const raw = Number(process.env.OBSIDIAN_RECENCY_WINDOW_DAYS);
     return Number.isFinite(raw) ? raw : 90;
   },
+  /**
+   * Length-normalize the per-note BM25 score so equal matches score alike regardless of
+   * file size. Off (0/false/no) restores the raw FTS5 bm25 score byte-for-byte.
+   */
+  get bm25LengthNorm(): boolean {
+    const raw = process.env.OBSIDIAN_BM25_LENGTH_NORM?.trim().toLowerCase();
+    return raw !== '0' && raw !== 'false' && raw !== 'no';
+  },
+  /** Exponent of the relative-length factor (chars / avgChars) ** exp applied to the score. */
+  get bm25LengthExp(): number {
+    const raw = Number(process.env.OBSIDIAN_BM25_LENGTH_EXP);
+    return Number.isFinite(raw) ? raw : 0.5;
+  },
   get dbPath(): string {
     const v = process.env.OBSIDIAN_VAULT_PATH;
     if (!v) throw new Error('OBSIDIAN_VAULT_PATH environment variable is required');

@@ -271,6 +271,58 @@ function filterFragment(predicate: FilterPredicate | undefined): {
   return { clause: ` AND ${predicate.sql}`, params: predicate.params };
 }
 
+// FTS5's built-in bm25() applies document-length normalization with fixed k1=1.2 / b=0.75
+// (the SQL weights 10/5/1 are COLUMN weights, not length params). notes_fts_bm25 is
+// external-content over notes — one FTS row per note — so a longer file with the same term
+// hits scores strictly lower: measured on the vault, the rank magnitude falls as ~chars^-0.35
+// across team-eff-review versions (14.2k chars → 4.89 vs 34.1k → 3.58), which sinks growing
+// reports below their older, shorter versions. This rescales the note score by
+// (chars/avgChars - 1)^exp — a compensating factor that is 1 (no-op) until the note is twice
+// the average length, so ordinary short notes keep the raw ranking untouched.
+let avgNoteLengthCache: { db: unknown; value: number } | null = null;
+
+function averageNoteLength(db: ReturnType<typeof getDb>): number {
+  if (avgNoteLengthCache && avgNoteLengthCache.db === db) return avgNoteLengthCache.value;
+  const row = db.prepare('SELECT AVG(length(content)) AS avg FROM notes').get() as
+    { avg: number | null } | undefined;
+  const value = row?.avg ?? 0;
+  avgNoteLengthCache = { db, value };
+  return value;
+}
+
+function lengthNormalizeBm25(results: RawResult[]): void {
+  if (!config.bm25LengthNorm || results.length === 0) return;
+  const db = getDb();
+  const avg = averageNoteLength(db);
+  if (avg <= 0) return;
+  const paths = results.map((r) => r.path);
+  const placeholders = paths.map(() => '?').join(', ');
+  const lengths = new Map<string, number>();
+  try {
+    const rows = db
+      .prepare(`SELECT path, length(content) AS len FROM notes WHERE path IN (${placeholders})`)
+      .all(...paths) as Array<{ path: string; len: number }>;
+    for (const row of rows) lengths.set(row.path, row.len);
+  } catch {
+    return;
+  }
+  const exp = config.bm25LengthExp;
+  for (const result of results) {
+    const raw = result.scores.bm25;
+    const len = lengths.get(result.path);
+    if (typeof raw !== 'number' || raw >= 1 || len === undefined) continue;
+    const factor = Math.max(1, Math.pow(Math.max(len / avg - 1, 0), exp));
+    // Undo the abs/(1+abs) squash, apply the factor to the raw magnitude, re-squash — this
+    // keeps the exposed score inside [0, 1) while reordering by the de-biased magnitude.
+    const magnitude = (raw / (1 - raw)) * factor;
+    const score = magnitude / (1 + magnitude);
+    result.scores.bm25 = score;
+    result.score = score;
+  }
+  // Reorder the list so the RRF arm consumes the de-biased ranking, not FTS5's raw one.
+  results.sort((a, b) => (b.scores.bm25 ?? 0) - (a.scores.bm25 ?? 0));
+}
+
 export function searchBm25(
   query: string,
   limit: number,
@@ -281,6 +333,10 @@ export function searchBm25(
   const db = getDb();
   const numTokens = Math.max(10, Math.ceil(snippetLength / 4));
   const filter = filterFragment(predicate);
+  // Length normalisation re-ranks after the SQL LIMIT, so the FTS5 top-`limit` is not
+  // necessarily the normalised top-`limit`: over-fetch a pool first (same trick as
+  // title mode), then slice. Off → bind exactly `limit`, byte-identical upstream query.
+  const pool = config.bm25LengthNorm ? Math.max(limit * 5, 50) : limit;
   // Widened from the former fixed 5-tuple: the filter params are spliced in before
   // `limit`, so the bind list is variable-length.
   const stmt = db.prepare<Array<string | number>, FtsRow>(
@@ -308,7 +364,7 @@ export function searchBm25(
       numTokens,
       toFtsQuery(query, 'OR'),
       ...filter.params,
-      limit,
+      pool,
     );
 
     const results: RawResult[] = rows.map((row) => ({
@@ -352,7 +408,8 @@ export function searchBm25(
         }
       }
     }
-    return results;
+    lengthNormalizeBm25(results);
+    return results.slice(0, limit);
   } catch {
     return [];
   }

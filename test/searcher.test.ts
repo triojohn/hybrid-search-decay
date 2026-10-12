@@ -1605,3 +1605,67 @@ describe('readNotes', () => {
     assert.deepEqual(r.tags, []);
   });
 });
+
+// --- BM25 length normalization ------------------------------------------------
+// FTS5's bm25() length-normalizes internally (k1=1.2, b=0.75): a longer note with the
+// same term hits scores lower, so growing reports sink below their older versions.
+// OBSIDIAN_BM25_LENGTH_NORM (default on) rescales by (chars / avgChars) ** exp.
+
+describe('BM25 length normalization', () => {
+  const TERM = 'LENGTHNORMPROBE';
+  const shortContent = `LENGTHNORMPROBE appears once here.`;
+  const longContent =
+    `LENGTHNORMPROBE appears once here. ` + 'padding filler sentence. '.repeat(300);
+
+  let savedNorm: string | undefined;
+
+  beforeAll(() => {
+    savedNorm = process.env.OBSIDIAN_BM25_LENGTH_NORM;
+    upsertNote({
+      path: 'len-norm-short.md',
+      title: 'Len Norm Short',
+      tags: [],
+      content: shortContent,
+      mtime: Date.now(),
+      hash: 'hash-len-norm-short',
+      chunks: [{ text: shortContent, embedding: fakeEmbedding }],
+    });
+    upsertNote({
+      path: 'len-norm-long.md',
+      title: 'Len Norm Long',
+      tags: [],
+      content: longContent,
+      mtime: Date.now(),
+      hash: 'hash-len-norm-long',
+      chunks: [{ text: longContent, embedding: fakeEmbedding }],
+    });
+  });
+
+  afterEach(() => {
+    if (savedNorm === undefined) delete process.env.OBSIDIAN_BM25_LENGTH_NORM;
+    else process.env.OBSIDIAN_BM25_LENGTH_NORM = savedNorm;
+  });
+
+  it('is length-independent when enabled, penalized when disabled', async () => {
+    const { searchBm25 } = await import('../src/searcher.js');
+    const scoreOf = (path: string): number => {
+      const hit = searchBm25(TERM, 10).find((r) => r.path === path);
+      assert.ok(hit, `${path} should match`);
+      return hit.scores.bm25 ?? 0;
+    };
+
+    process.env.OBSIDIAN_BM25_LENGTH_NORM = '0';
+    const shortOff = scoreOf('len-norm-short.md');
+    const longOff = scoreOf('len-norm-long.md');
+
+    process.env.OBSIDIAN_BM25_LENGTH_NORM = '1';
+    const shortOn = scoreOf('len-norm-short.md');
+    const longOn = scoreOf('len-norm-long.md');
+
+    assert.ok(longOff < shortOff, `disabled: long ${longOff} should score below short ${shortOff}`);
+    assert.ok(
+      longOn / shortOn > longOff / shortOff,
+      `enabled: long/short ${longOn / shortOn} should beat disabled ${longOff / shortOff}`,
+    );
+  });
+});
