@@ -1,3 +1,9 @@
+# hybrid-search-decay
+
+Fork of [flowing-abyss/obsidian-hybrid-search](https://github.com/flowing-abyss/obsidian-hybrid-search) — a personal fork used to work on ranking, specifically adding a recency/decay signal to hybrid retrieval. The recency channel is not implemented yet; this fork is the development ground for it. Binary names are unchanged (`obsidian-hybrid-search`, `ohs`, `obsidian-hybrid-search-mcp`) so the stock Obsidian plugin keeps working against it.
+
+Upstream project:
+
 # Obsidian Hybrid Search
 
 [![npm version](https://img.shields.io/npm/v/obsidian-hybrid-search)](https://www.npmjs.com/package/obsidian-hybrid-search)

@@ -1,6 +1,6 @@
 {
-  "name": "obsidian-hybrid-search",
-  "version": "0.16.2",
+  "name": "hybrid-search-decay",
+  "version": "1.0.0",
   "mcpName": "io.github.flowing-abyss/obsidian-hybrid-search",
   "type": "module",
   "bin": {
@@ -45,16 +45,19 @@
     "sqlite",
     "mcp"
   ],
-  "author": "flowing-abyss",
+  "author": "triojohn <triojohn@mail.ru>",
+  "contributors": [
+    "flowing-abyss (upstream: https://github.com/flowing-abyss/obsidian-hybrid-search)"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flowing-abyss/obsidian-hybrid-search.git"
+    "url": "git+https://github.com/triojohn/hybrid-search-decay.git"
   },
   "bugs": {
-    "url": "https://github.com/flowing-abyss/obsidian-hybrid-search/issues"
+    "url": "https://github.com/triojohn/hybrid-search-decay/issues"
   },
-  "homepage": "https://github.com/flowing-abyss/obsidian-hybrid-search#readme",
+  "homepage": "https://github.com/triojohn/hybrid-search-decay#readme",
   "engines": {
     "node": ">=20"
   },
