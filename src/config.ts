@@ -42,6 +42,16 @@ export const config = {
   get rerankerModel(): string {
     return process.env.RERANKER_MODEL ?? DEFAULT_RERANKER_MODEL;
   },
+  /** Weight of the recency RRF arm. <= 0 removes the arm entirely (upstream behaviour). */
+  get recencyWeight(): number {
+    const raw = Number(process.env.OBSIDIAN_RECENCY_WEIGHT);
+    return Number.isFinite(raw) ? raw : 0.75;
+  },
+  /** Only notes modified within this many days compete on freshness. 0 = no window. */
+  get recencyWindowDays(): number {
+    const raw = Number(process.env.OBSIDIAN_RECENCY_WINDOW_DAYS);
+    return Number.isFinite(raw) ? raw : 90;
+  },
   get dbPath(): string {
     const v = process.env.OBSIDIAN_VAULT_PATH;
     if (!v) throw new Error('OBSIDIAN_VAULT_PATH environment variable is required');

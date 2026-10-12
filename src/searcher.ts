@@ -890,6 +890,87 @@ function searchVector(
   });
 }
 
+const RECENCY_DAY_MS = 86_400_000;
+
+/**
+ * Recency arm: the notes with the newest `mtime`, newest first, capped at the same
+ * candidate pool the other arms get.
+ *
+ * Query-independent by design — RRF reads only each list's ORDER, so this arm
+ * contributes a freshness rank and nothing else. `score`/`snippet` are placeholders
+ * for that same reason: rrfFusion overwrites `score`, and search() fills a missing
+ * snippet from note content.
+ *
+ * `withinPaths` is the union of the paths the other arms already retrieved, and it is
+ * a hard restriction, not a preference. Without it this arm can INVENT hits: for a
+ * query that matches nothing (or matches two notes) the recency pool alone would fill
+ * the result list with unrelated recent notes — `search('', {})` returned ten notes
+ * before this restriction existed. Recency re-ranks what the query found; it never
+ * brings anything the query did not find.
+ *
+ * The tag/scope/frontmatter predicate is spliced into this query too. It is written
+ * over the alias `n` (the `notes` table), which is exactly the alias used here, so a
+ * filtered search cannot receive recency candidates the other arms were forbidden to
+ * return — and there is no second copy of the filter logic.
+ *
+ * windowDays <= 0 disables the window: every retrieved note competes on freshness.
+ */
+function searchRecency(
+  limit: number,
+  withinPaths: ReadonlySet<string>,
+  predicate?: FilterPredicate,
+): RawResult[] {
+  if (limit <= 0 || withinPaths.size === 0) return [];
+
+  const paths = [...withinPaths];
+  const conditions: string[] = [`n.path IN (${paths.map(() => '?').join(', ')})`];
+  const params: Array<string | number> = [...paths];
+  if (config.recencyWindowDays > 0) {
+    conditions.push('n.mtime >= ?');
+    params.push(Date.now() - config.recencyWindowDays * RECENCY_DAY_MS);
+  }
+  if (predicate !== undefined && !predicate.isEmpty) {
+    conditions.push(predicate.sql);
+    params.push(...predicate.params);
+  }
+
+  try {
+    const rows = getDb()
+      .prepare<
+        Array<string | number>,
+        { path: string; title: string | null; tags: string | null; aliases: string | null }
+      >(
+        `SELECT n.path, n.title, n.tags, n.aliases FROM notes n
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY n.mtime DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit);
+
+    return rows.map((row) => ({
+      path: row.path,
+      title: row.title ?? '',
+      tags: row.tags ?? '[]',
+      aliases: row.aliases,
+      snippet: '',
+      score: 1,
+      scores: {},
+    }));
+  } catch (error) {
+    // Never swallow silently: an empty recency list is indistinguishable from "no
+    // recent notes", and would quietly drop the fusion's fresh-note signal.
+    process.stderr.write(
+      `Recency search failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return [];
+  }
+}
+
+/** Paths already retrieved by the other fusion arms — the recency arm's whole universe. */
+function retrievedPaths(lists: RawResult[][]): Set<string> {
+  return new Set(lists.flatMap((list) => list.map((r) => r.path)));
+}
+
 function rrfFusion(lists: RawResult[][], k = 60, weights?: number[]): RawResult[] {
   const scores = new Map<string, { rrfScore: number; result: RawResult }>();
 
@@ -1513,7 +1594,19 @@ export async function search(input: string, options: SearchOptions = {}): Promis
         ),
       ),
     );
-    results = measureSearchStageSync('rrfFusion', () => rrfFusion(perQueryResults, 60));
+    // Recency is query-independent, so ONE list is appended here rather than
+    // replicated into every sub-query: RRF reads rank only, so a per-sub-query copy
+    // would contribute the identical order N times and multiply the recency weight
+    // by N. Gated to hybrid mode, exactly like the single-query arm.
+    const fusedLists = [...perQueryResults];
+    let fusedWeights: number[] | undefined;
+    if (mode === 'hybrid' && config.recencyWeight > 0) {
+      fusedLists.push(searchRecency(candidateLimit, retrievedPaths(perQueryResults), predicate));
+      fusedWeights = [...perQueryResults.map(() => 1), config.recencyWeight];
+    }
+    results = measureSearchStageSync('rrfFusion', () =>
+      fusedWeights ? rrfFusion(fusedLists, 60, fusedWeights) : rrfFusion(fusedLists, 60),
+    );
     // Populate scores.hybrid on merged results (mirrors single-query hybrid path)
     for (const r of results) {
       r.scores.hybrid = r.score;
@@ -1768,13 +1861,17 @@ async function searchByQuery(
   // Partial fuzzy matches (trigram overlap < 1.0) remain at low weight to avoid false positives.
   const exactAliasResults = fuzzyResults.filter((r) => r.scores.fuzzy_title === 1.0);
   const partialFuzzyResults = fuzzyResults.filter((r) => r.scores.fuzzy_title !== 1.0);
-  let results = measureSearchStageSync('rrfFusion', () =>
-    rrfFusion(
-      [vectorResults, bm25Results, exactAliasResults, partialFuzzyResults],
-      60,
-      [1.5, 1.5, 2.0, 0.25],
-    ),
-  );
+
+  // Fifth arm: freshness. Added only when the weight is positive, so a disabled
+  // channel leaves the list set and the weights byte-identical to upstream.
+  const weights = [1.5, 1.5, 2.0, 0.25];
+  const lists = [vectorResults, bm25Results, exactAliasResults, partialFuzzyResults];
+  if (config.recencyWeight > 0) {
+    lists.push(searchRecency(candidateLimit, retrievedPaths(lists), predicate));
+    weights.push(config.recencyWeight);
+  }
+
+  let results = measureSearchStageSync('rrfFusion', () => rrfFusion(lists, 60, weights));
 
   // Populate scores.hybrid for hybrid mode — always, regardless of rerank flag
   for (const r of results) {
