@@ -75,6 +75,18 @@ export const config = {
     const raw = process.env.OBSIDIAN_VEC_PER_NOTE_CUTOFF?.trim().toLowerCase();
     return raw !== '0' && raw !== 'false' && raw !== 'no';
   },
+  /**
+   * Relative bump (e.g. 0.02 = +2%) applied to the fused score of the newest note in a
+   * document series — notes sharing a normalised title (leading ISO date and trailing
+   * version suffix stripped). Lifts the current version above the older ones it loses to,
+   * without touching its siblings. 0/false/no disables it (upstream ranking).
+   */
+  get versionBoost(): number {
+    const raw = process.env.OBSIDIAN_VERSION_BOOST?.trim().toLowerCase();
+    if (raw === '0' || raw === 'false' || raw === 'no') return 0;
+    const num = Number(process.env.OBSIDIAN_VERSION_BOOST);
+    return Number.isFinite(num) && num > 0 ? num : 0.02;
+  },
   get dbPath(): string {
     const v = process.env.OBSIDIAN_VAULT_PATH;
     if (!v) throw new Error('OBSIDIAN_VAULT_PATH environment variable is required');

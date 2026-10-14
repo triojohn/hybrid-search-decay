@@ -323,6 +323,102 @@ function lengthNormalizeBm25(results: RawResult[]): void {
   results.sort((a, b) => (b.scores.bm25 ?? 0) - (a.scores.bm25 ?? 0));
 }
 
+// ─── Document-series boost ───────────────────────────────────────────────────
+//
+// Growing reports are re-versioned under a new dated filename, and the OLD version often
+// outranks the new one: it is shorter (better BM25 magnitude) and sometimes caught by two
+// text arms while the new one is caught by one. Series identity here is the note's
+// basename with the leading ISO date and the trailing version suffix stripped, so
+// `2026-10-12-team-eff-review-v2.md` and `2026-09-28-team-eff-review.md` map to
+// `team-eff-review`. The newest member (by title date, then mtime) gets a small relative
+// bump — just enough to clear its own siblings — and nothing else moves.
+
+const LEADING_DATE = /^(\d{4}-\d{2}-\d{2})[-_ ]?/;
+const TRAILING_VERSION = /[-_ ]?v\d+$/i;
+const TRAILING_PAREN = /[-_ ]?\(\d+\)$/;
+
+/** Series key of a note path: normalised basename, or null when nothing is left of it. */
+export function seriesKey(notePath: string): string | null {
+  const base = notePath.slice(notePath.lastIndexOf('/') + 1).replace(/\.md$/i, '');
+  const date = LEADING_DATE.exec(base);
+  let rest = date ? base.slice(date[0].length) : base;
+  rest = rest.replace(TRAILING_VERSION, '').replace(TRAILING_PAREN, '');
+  return rest.length > 0 ? rest : null;
+}
+
+/** Leading ISO date of a note path, or '' when the filename carries none. */
+function seriesDate(notePath: string): string {
+  const base = notePath.slice(notePath.lastIndexOf('/') + 1);
+  return LEADING_DATE.exec(base)?.[1] ?? '';
+}
+
+function boostNewestVersion(boost: number, results: RawResult[]): void {
+  if (boost <= 0 || results.length < 2) return;
+  const groups = new Map<string, RawResult[]>();
+  for (const result of results) {
+    const key = seriesKey(result.path);
+    if (!key) continue;
+    const group = groups.get(key);
+    if (group) group.push(result);
+    else groups.set(key, [result]);
+  }
+  const series = [...groups.values()].filter((group) => group.length > 1);
+  if (series.length === 0) return;
+  const lifted = new Set<RawResult>();
+
+  // mtime is only needed to order version-less siblings that share a series key.
+  const mtimes = new Map<string, number>();
+  const undated = series.flat().filter((r) => seriesDate(r.path) === '');
+  if (undated.length > 1) {
+    const db = getDb();
+    const paths = undated.map((r) => r.path);
+    const placeholders = paths.map(() => '?').join(', ');
+    try {
+      const rows = db
+        .prepare(`SELECT path, mtime FROM notes WHERE path IN (${placeholders})`)
+        .all(...paths) as Array<{ path: string; mtime: number }>;
+      for (const row of rows) mtimes.set(row.path, row.mtime);
+    } catch {
+      // A missing lookup only loses the tie-break, never the boost.
+    }
+  }
+
+  for (const group of series) {
+    const member = (r: RawResult) => ({
+      r,
+      date: seriesDate(r.path),
+      mtime: mtimes.get(r.path) ?? 0,
+    });
+    const members = group.map(member);
+    const newest = members.reduce(
+      (best, candidate) => (isNewer(candidate, best) ? candidate : best),
+      members[0]!,
+    );
+    const top = Math.max(...group.map((r) => r.score));
+    const score = Math.min(1, Math.max(newest.r.score, top) * (1 + boost));
+    newest.r.score = score;
+    newest.r.scores.hybrid = score;
+    lifted.add(newest.r);
+  }
+  // The bump can reorder the list, and the caller slices ranks from that order. The max
+  // fused score is 1, so a bump on the leader saturates; the lifted note then wins the tie
+  // instead of depending on the pre-boost order.
+  results.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (lifted.has(a) !== lifted.has(b)) return lifted.has(a) ? -1 : 1;
+    return 0;
+  });
+}
+
+function isNewer(a: { date: string; mtime: number }, b: { date: string; mtime: number }): boolean {
+  if (a.date !== b.date) {
+    if (a.date === '') return false;
+    if (b.date === '') return true;
+    return a.date > b.date;
+  }
+  return a.mtime > b.mtime;
+}
+
 export function searchBm25(
   query: string,
   limit: number,
@@ -1715,6 +1811,11 @@ export async function search(input: string, options: SearchOptions = {}): Promis
       predicate,
     );
   }
+
+  // Version boost, hybrid only: within a document series push the newest version over its
+  // own siblings, before the threshold and the limit slice decide the final set. The other
+  // modes have no fused score to lift, and path/related lookups must stay ordered as-is.
+  if (mode === 'hybrid' && !isPathLookup) boostNewestVersion(config.versionBoost, results);
 
   const { filteredResults, final } = measureSearchStageSync('filterAndFormat', () => {
     // Scope, tag and frontmatter are pushed into every retrieval arm as a SQL
